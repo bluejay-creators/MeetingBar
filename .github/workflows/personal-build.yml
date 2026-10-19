@@ -1,0 +1,121 @@
+name: Personal build
+run-name: "Personal build · ${{ github.sha }}"
+
+# Builds the personal MeetingBar (branch `personal` of bluejay-creators/MeetingBar)
+# and publishes it as a GitHub release. Fork-only: upstream never sees this file.
+# The signing identity is KMS ciphertext, decrypted through GitHub OIDC; see
+# bluejay-creators/setup infra/ci-signing/README.md.
+
+on:
+  push:
+    branches: [personal]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create the release
+  id-token: write   # GitHub OIDC token for Workload Identity Federation
+
+concurrency:
+  group: personal-build
+  cancel-in-progress: false
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+  BUNDLE_ID: io.github.bluejay-creators.MeetingBar
+  # Not secret: an OAuth client ID ships inside every build; iOS clients have no secret.
+  GOOGLE_CLIENT_NUMBER: 1009816965790-sm2hn3hfqvfpjq71i6pevavqjvh1fqkb
+
+jobs:
+  build:
+    if: github.repository == 'bluejay-creators/MeetingBar'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build configuration
+        run: |
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          cat > XCConfig/DevTeamOverride.xcconfig <<EOF
+          DEVELOPMENT_TEAM =
+          GOOGLE_CLIENT_NUMBER = $GOOGLE_CLIENT_NUMBER
+          GOOGLE_CLIENT_SECRET =
+          GOOGLE_AUTH_KEYCHAIN_NAME = MeetingBar Personal Google Auth
+          EOF
+
+      - name: Build (unsigned)
+        run: |
+          xcodebuild -project MeetingBar.xcodeproj -scheme MeetingBar -configuration Release \
+            -destination 'platform=macOS,arch=arm64' -derivedDataPath build/DerivedData \
+            -clonedSourcePackagesDirPath build/SourcePackages -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build | tail -20
+          test -d build/DerivedData/Build/Products/Release/MeetingBar.app
+
+      - id: gcp
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SIGNER_SA }}
+          token_format: access_token
+          create_credentials_file: false
+
+      - name: Decrypt signing identity (Cloud KMS)
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
+          CIPHERTEXT: ${{ secrets.SIGNING_BUNDLE_KMS }}
+          KMS_KEY: ${{ vars.GCP_SIGNING_KEY }}
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/sign"
+          printf '{"ciphertext":"%s"}' "$CIPHERTEXT" > "$RUNNER_TEMP/sign/req.json"
+          curl -fsS -X POST -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json' \
+            --data @"$RUNNER_TEMP/sign/req.json" "https://cloudkms.googleapis.com/v1/$KMS_KEY:decrypt" \
+            | python3 -c 'import json,sys,base64; sys.stdout.buffer.write(base64.b64decode(json.load(sys.stdin)["plaintext"]))' \
+            > "$RUNNER_TEMP/sign/bundle.tgz"
+          tar -xzf "$RUNNER_TEMP/sign/bundle.tgz" -C "$RUNNER_TEMP/sign"
+          rm -f "$RUNNER_TEMP/sign/req.json" "$RUNNER_TEMP/sign/bundle.tgz"
+
+      - name: Sign
+        run: |
+          S="$RUNNER_TEMP/sign"; KC="$RUNNER_TEMP/sign.keychain-db"
+          KCPW=$(openssl rand -hex 24)
+          security create-keychain -p "$KCPW" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          security unlock-keychain -p "$KCPW" "$KC"
+          security import "$S/identity.p12" -k "$KC" -P "$(cat "$S/p12-password")" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC" >/dev/null
+          # Ephemeral runner: trust the self-signed cert for code signing here only.
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$S/cert.pem"
+          ID=$(openssl x509 -in "$S/cert.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :)
+          APP=build/DerivedData/Build/Products/Release/MeetingBar.app
+          # Nested code first (no entitlements), then the app with the personal entitlements.
+          codesign --force --deep --options runtime --timestamp=none --keychain "$KC" --sign "$ID" "$APP"
+          codesign --force --options runtime --timestamp=none --keychain "$KC" --sign "$ID" \
+            --entitlements personal/MeetingBar.entitlements "$APP"
+          security delete-keychain "$KC"
+          rm -rf "$S"
+
+      - name: Verify
+        run: |
+          APP=build/DerivedData/Build/Products/Release/MeetingBar.app
+          codesign --verify --deep --strict "$APP"
+          test "$(defaults read "$PWD/$APP/Contents/Info" CFBundleIdentifier)" = "$BUNDLE_ID"
+          test "$(defaults read "$PWD/$APP/Contents/Info" GOOGLE_CLIENT_NUMBER)" = "$GOOGLE_CLIENT_NUMBER"
+          # Stable identity: the designated requirement must pin the certificate, not a cdhash.
+          codesign -d -r- "$APP" 2>&1 | tee /dev/stderr | grep -qE 'certificate (leaf|root) = H"'
+          if codesign -d --entitlements - --xml "$APP" | grep -q time-sensitive; then
+            echo "time-sensitive entitlement must not be present"; exit 1
+          fi
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APP=build/DerivedData/Build/Products/Release/MeetingBar.app
+          VERSION=$(defaults read "$PWD/$APP/Contents/Info" CFBundleShortVersionString)
+          TAG="personal-$(date -u +%Y%m%d-%H%M)-${GITHUB_SHA::7}"
+          ditto -c -k --keepParent "$APP" MeetingBar.zip
+          SHA256=$(shasum -a 256 MeetingBar.zip | cut -d' ' -f1)
+          printf 'Personal MeetingBar %s from `%s`.\n\nzip sha256: `%s`\n' "$VERSION" "${GITHUB_SHA::7}" "$SHA256" > notes.md
+          git log --format='- %s' -20 --first-parent HEAD >> notes.md
+          gh release create "$TAG" MeetingBar.zip --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md --latest
