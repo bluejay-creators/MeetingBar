@@ -84,6 +84,9 @@ jobs:
           security unlock-keychain -p "$KCPW" "$KC"
           security import "$S/identity.p12" -k "$KC" -P "$(cat "$S/p12-password")" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC" >/dev/null
+          # codesign finds identities only in the search list, even with --keychain.
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$KC"
           # Ephemeral runner: trust the self-signed cert for code signing here only.
           sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$S/cert.pem"
           ID=$(openssl x509 -in "$S/cert.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :)
