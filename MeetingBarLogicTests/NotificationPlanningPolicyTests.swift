@@ -103,6 +103,25 @@ final class NotificationPlannerTests: XCTestCase {
         XCTAssertEqual(Set(plans.map(\.kind)), Set(NotificationKind.allCases))
     }
 
+    func testJoinedEventDropsOnlyItsStartAlerts() {
+        var joined = event(id: "joined", startsIn: 600)
+        joined.isJoined = true
+        let plans = NotificationPlanner.plan(
+            events: [joined, event(id: "other", startsIn: 600)],
+            settings: allEnabled,
+            now: now
+        )
+
+        XCTAssertEqual(
+            Set(plans.filter { $0.eventID == "joined" }.map(\.kind)),
+            [.eventEnd, .autoJoin, .scriptOnStart]
+        )
+        XCTAssertEqual(
+            Set(plans.filter { $0.eventID == "other" }.map(\.kind)),
+            Set(NotificationKind.allCases)
+        )
+    }
+
     func testNoLinkEventDoesNotPlanFullscreenNotificationByDefault() {
         let plans = NotificationPlanner.plan(
             events: [event(startsIn: 600, hasMeetingLink: false)],

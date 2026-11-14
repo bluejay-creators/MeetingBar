@@ -26,6 +26,14 @@ struct ProcessedEvent: Codable, Defaults.Serializable, Hashable {
     var eventEndDate: Date
 }
 
+/// A meeting the user joined. Start and end dates are part of the match, so a
+/// rescheduled event alerts again.
+struct JoinedMeeting: Codable, Defaults.Serializable, Hashable {
+    var id: String
+    var startDate: Date
+    var endDate: Date
+}
+
 func cleanUpNotes(_ notes: String) -> String {
     let zoomSeparator = "\n──────────"
     let meetSeparator =
