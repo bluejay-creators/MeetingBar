@@ -87,6 +87,10 @@ final class NotificationActionRunner {
             hasMeetingLink: event.meetingLink != nil
         )
 
+        // Read at fire time: a delayed action carries the settings and plan
+        // from when it was scheduled, which predate a join made since.
+        if plan.kind.isStartAlert, recordStore.isJoined(event) { return }
+
         if plan.kind == .fullscreen {
             guard FullscreenNotificationEligibilityPolicy.isEligible(
                 hasMeetingLink: actionEvent.hasMeetingLink,
@@ -208,6 +212,7 @@ final class NotificationRecordStore {
                 Defaults[.processedEventsForRunScriptOnEventStart].actionRecords,
                 now: now
             ).processedEvents
+        Defaults[.joinedMeetings] = Defaults[.joinedMeetings].filter { $0.endDate > now }
     }
 
     // MARK: - Read
@@ -240,16 +245,24 @@ final class NotificationRecordStore {
         }
     }
 
-    /// Record a meeting the user joined as already handled for its fullscreen
-    /// alert, so joining early does not bring the alert up at start time.
+    // MARK: - Joined meetings
+
+    /// Record a meeting the user joined, so its start-time alerts (system
+    /// notification and fullscreen) are skipped.
     func recordJoined(_ event: MBEvent) {
-        var records = processedRecords(for: .fullscreen).filter { $0.id != event.id }
-        records.append(EventActionProcessedEvent(
-            id: event.id,
-            lastModifiedDate: event.lastModifiedDate,
-            eventEndDate: event.endDate
-        ))
-        setProcessedRecords(records, for: .fullscreen)
+        var records = Defaults[.joinedMeetings].filter { $0.id != event.id }
+        records.append(JoinedMeeting(event: event))
+        Defaults[.joinedMeetings] = records
+    }
+
+    func isJoined(_ event: MBEvent) -> Bool {
+        Defaults[.joinedMeetings].contains(JoinedMeeting(event: event))
+    }
+}
+
+private extension JoinedMeeting {
+    init(event: MBEvent) {
+        self.init(id: event.id, startDate: event.startDate, endDate: event.endDate)
     }
 }
 

@@ -177,7 +177,7 @@ struct AppEnvironment {
     var openMeeting: @MainActor (MBEvent) -> Void
 
     /// Record that the user joined an event's meeting, so its start-time
-    /// fullscreen alert is skipped.
+    /// alerts (system notification and fullscreen) are skipped.
     var recordMeetingJoined: @MainActor (MBEvent) -> Void
 
     /// Dismiss an event from next-meeting workflows.
@@ -573,11 +573,13 @@ final class AppModel: ObservableObject {
     }
 
     /// Without a meeting link, opening falls back to the event page; that is
-    /// not a join, so the fullscreen alert still applies.
+    /// not a join, so the start-time alerts still apply.
     private func join(_ event: MBEvent) {
         environment.openMeeting(event)
         if event.meetingLink != nil {
             environment.recordMeetingJoined(event)
+            // Withdraw the start notification already queued with the system.
+            reconcileNotificationsFromState()
         }
     }
 

@@ -229,3 +229,104 @@ final class NotificationActionHandlerTests: XCTestCase {
         )
     }
 }
+
+/// Start-time alerts for a meeting the user has already joined.
+@MainActor
+final class JoinedMeetingAlertTests: BaseTestCase {
+    private let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+
+    private let startAndEndSettings = NotificationPlanningSettings(
+        eventStart: .init(enabled: true, offset: 60),
+        eventEnd: .init(enabled: true, offset: 60),
+        fullscreen: .disabled,
+        autoJoin: .disabled,
+        scriptOnStart: .disabled,
+        dismissedEventIDs: []
+    )
+
+    private func fullscreenSettings(offset: TimeInterval) -> NotificationPlanningSettings {
+        NotificationPlanningSettings(
+            eventStart: .disabled,
+            eventEnd: .disabled,
+            fullscreen: .init(enabled: true, offset: offset),
+            autoJoin: .disabled,
+            scriptOnStart: .disabled,
+            dismissedEventIDs: []
+        )
+    }
+
+    private func zoomEvent(id: String, start: Date, duration: TimeInterval = 1800) -> MBEvent {
+        makeFakeEvent(id: id, start: start, end: start.addingTimeInterval(duration), withLink: true)
+    }
+
+    /// Kinds of the pending system notifications for one event.
+    private func pendingKinds(_ sink: FakeNotificationRequestSink, eventID: String) -> Set<String> {
+        Set(sink.currentPendingRequests()
+            .filter { ($0.content.userInfo["eventID"] as? String) == eventID }
+            .map { $0.content.categoryIdentifier.isEmpty ? "end" : "start" })
+    }
+
+    private func waitUntil(timeout: TimeInterval = 2, _ condition: () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, !condition() {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    func testJoinedMeetingKeepsOnlyItsEndNotification() async {
+        let sink = FakeNotificationRequestSink()
+        let scheduler = NotificationScheduler(sink: sink)
+        let joined = zoomEvent(id: "joined", start: now.addingTimeInterval(600))
+        let other = zoomEvent(id: "other", start: now.addingTimeInterval(600))
+        NotificationRecordStore().recordJoined(joined)
+
+        await scheduler.reconcile(events: [joined, other], settings: startAndEndSettings, now: now)
+
+        XCTAssertEqual(pendingKinds(sink, eventID: "joined"), ["end"])
+        XCTAssertEqual(pendingKinds(sink, eventID: "other"), ["start", "end"])
+    }
+
+    func testRescheduledMeetingAlertsAgainAfterAnEarlierJoin() async {
+        let sink = FakeNotificationRequestSink()
+        let scheduler = NotificationScheduler(sink: sink)
+        let original = zoomEvent(id: "event", start: now.addingTimeInterval(600))
+        NotificationRecordStore().recordJoined(original)
+        let moved = zoomEvent(id: "event", start: now.addingTimeInterval(4200))
+
+        await scheduler.reconcile(events: [moved], settings: startAndEndSettings, now: now)
+
+        XCTAssertEqual(pendingKinds(sink, eventID: "event"), ["start", "end"])
+    }
+
+    func testJoinedRecordIsDroppedOnceTheMeetingEnds() {
+        let store = NotificationRecordStore()
+        let event = zoomEvent(id: "event", start: now, duration: 1800)
+        store.recordJoined(event)
+
+        store.cleanupExpired(now: now.addingTimeInterval(1799))
+        XCTAssertTrue(store.isJoined(event))
+
+        store.cleanupExpired(now: now.addingTimeInterval(1800))
+        XCTAssertFalse(store.isJoined(event))
+    }
+
+    func testFullscreenScheduledBeforeAJoinDoesNotFireAfterIt() async throws {
+        let actionSink = FakeNotificationActionSink()
+        let scheduler = NotificationScheduler(sink: FakeNotificationRequestSink(), actionSink: actionSink)
+        defer { scheduler.stop() }
+        let scheduledNow = Date()
+        let joined = zoomEvent(id: "joined", start: scheduledNow.addingTimeInterval(0.35))
+        let other = zoomEvent(id: "other", start: scheduledNow.addingTimeInterval(0.35))
+
+        await scheduler.reconcile(
+            events: [joined, other], settings: fullscreenSettings(offset: 0.25), now: scheduledNow)
+        // Joined after the delayed fullscreen action was scheduled, with no
+        // reconcile in between: the action must check at fire time.
+        NotificationRecordStore().recordJoined(joined)
+
+        await waitUntil { !actionSink.actions.isEmpty }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(actionSink.actions.map(\.eventID), ["other"])
+    }
+}
+

@@ -54,6 +54,8 @@ extension Defaults.Keys {
     )
     static let processedEventsForFullscreenNotification = Key<[ProcessedEvent]>(
         "processedEventsForFullscreenNotification", default: [])
+    /// Meetings already joined; their start-time alerts are skipped.
+    static let joinedMeetings = Key<[JoinedMeeting]>("joinedMeetings", default: [])
 
     static let preferredLanguage = Key<AppLanguage>("preferredLanguage", default: .system)
 

@@ -12,6 +12,13 @@ enum NotificationKind: String, CaseIterable, Equatable, Sendable {
     case fullscreen  // fullscreen overlay window
     case autoJoin  // automatically open the meeting URL
     case scriptOnStart  // run the user-configured AppleScript
+
+    /// Alerts that tell the user a meeting is starting. They are skipped for a
+    /// meeting the user has already joined. The end-of-event notification is
+    /// not one: it matters most while the user is in the meeting.
+    var isStartAlert: Bool {
+        self == .eventStart || self == .fullscreen
+    }
 }
 
 /// A single concrete reminder the scheduler should reconcile to the OS.
@@ -45,6 +52,8 @@ struct NotificationPlanningEvent: Equatable, Sendable {
     let participationStatus: ParticipationStatus
     let isAllDay: Bool
     let hasMeetingLink: Bool
+    /// The user already joined this meeting, so its start-time alerts are moot.
+    var isJoined = false
 }
 
 struct NotificationPlanningSettings: Equatable, Sendable {
@@ -167,6 +176,7 @@ enum NotificationPlanner {
         into planned: inout [PlannedNotification]
     ) {
         guard action.enabled else { return }
+        if event.isJoined && kind.isStartAlert { return }
         let fireDate = anchor.addingTimeInterval(-action.offset)
         guard fireDate > now else { return }
         planned.append(

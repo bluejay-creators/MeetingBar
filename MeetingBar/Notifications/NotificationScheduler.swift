@@ -53,6 +53,7 @@ final class NotificationScheduler {
 
     private let sink: NotificationRequestSink
     private let runner: NotificationActionRunner
+    private let recordStore: NotificationRecordStore
     private let sleepAction: @Sendable (TimeInterval) async throws -> Void
     private let actionDate: @MainActor () -> Date
 
@@ -84,7 +85,9 @@ final class NotificationScheduler {
         actionDate: @escaping @MainActor () -> Date = { Date() }
     ) {
         self.sink = sink
-        self.runner = NotificationActionRunner(actionSink: actionSink)
+        let recordStore = NotificationRecordStore()
+        self.recordStore = recordStore
+        self.runner = NotificationActionRunner(recordStore: recordStore, actionSink: actionSink)
         self.sleepAction = sleepAction
         self.actionDate = actionDate
     }
@@ -113,7 +116,11 @@ final class NotificationScheduler {
         now: Date = Date()
     ) async {
         guard !isStopped, !Task.isCancelled else { return }
-        let planningEvents = events.map(NotificationPlanningEvent.init(event:))
+        let planningEvents = events.map { event in
+            var planningEvent = NotificationPlanningEvent(event: event)
+            planningEvent.isJoined = recordStore.isJoined(event)
+            return planningEvent
+        }
         let plans =
             NotificationPlanner
             .plan(events: planningEvents, settings: settings, now: now)

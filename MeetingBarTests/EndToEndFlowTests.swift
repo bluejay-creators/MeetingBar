@@ -273,6 +273,27 @@ class EndToEndFlowTestCase: BaseTestCase {
             .sorted()
     }
 
+    /// Event IDs with a pending start notification (the one carrying the
+    /// event category and its Join action).
+    fileprivate func startNotificationEventIDs(_ harness: EndToEndHarness) -> [String] {
+        pendingEventIDs(harness) { $0 == EventNotificationIdentifiers.eventCategory }
+    }
+
+    /// Event IDs with a pending end-of-event notification.
+    fileprivate func endNotificationEventIDs(_ harness: EndToEndHarness) -> [String] {
+        pendingEventIDs(harness) { $0.isEmpty }
+    }
+
+    private func pendingEventIDs(
+        _ harness: EndToEndHarness,
+        category matches: (String) -> Bool
+    ) -> [String] {
+        harness.notificationSink.currentPendingRequests()
+            .filter { matches($0.content.categoryIdentifier) }
+            .compactMap { $0.content.userInfo["eventID"] as? String }
+            .sorted()
+    }
+
     /// Dispatches the item's action to its target — the same target/action
     /// path AppKit uses when the user clicks the menu item.
     fileprivate func performClick(
@@ -813,6 +834,31 @@ final class NotificationEndToEndFlowTests: EndToEndFlowTestCase {
             fullscreenEventIDs.contains("E2")
         }
         XCTAssertEqual(fullscreenEventIDs, ["E2"])
+    }
+
+    func testStartNotificationWithdrawnForEventJoinedEarly() async throws {
+        configureDisplayDefaults()
+        Defaults[.joinEventNotification] = true
+        Defaults[.endOfEventNotification] = true
+        let harness = makeHarness(events: [
+            makeEvent(id: "E1", startingIn: 600),
+            makeEvent(id: "E2", startingIn: 600)
+        ])
+        defer { harness.stop() }
+
+        try await waitUntil("start and end notifications scheduled for both events") {
+            self.startNotificationEventIDs(harness) == ["E1", "E2"]
+                && self.endNotificationEventIDs(harness) == ["E1", "E2"]
+        }
+
+        harness.model.send(.joinMeeting(eventID: "E1"))
+        XCTAssertEqual(harness.openedMeetingIDs, ["E1"])
+
+        try await waitUntil("the joined event's start notification is withdrawn") {
+            self.startNotificationEventIDs(harness) == ["E2"]
+        }
+        // The end reminder still matters while the user is in the meeting.
+        XCTAssertEqual(endNotificationEventIDs(harness), ["E1", "E2"])
     }
 
     func testInAppActionSuppressedWhileScreenLockedThenFiresAfterUnlock() async throws {
